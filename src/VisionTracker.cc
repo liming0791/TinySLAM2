@@ -22,7 +22,7 @@ void VisionTracker::TrackMonocular(ImageFrame& f)
             std::lock_guard<std::mutex> lock(mRefFrameMutex);
             kf = refFrame;
         }
-        f.opticalFlowFAST(*kf);
+        f.opticalFlowMeasure(*kf);
         //TrackPose3D2D(*kf, f);
     }
 }
@@ -34,10 +34,15 @@ void VisionTracker::TrackMonocularLocal(ImageFrame& f)
         state = INITIALIZING;
     } else if (state == INITIALIZING) {
         if (initializer.TryInitialize(&f)) {
+
+            AddTrace(*initializer.k1);      // add camera trace
+            AddTrace(*initializer.k2);
+
             {
                 std::lock_guard<std::mutex> lock(mRefFrameMutex);
                 refFrame = initializer.k2;
             }
+            refFrames.insert(refFrame);
             state = INITIALIZED;
         }
     } else {
@@ -46,7 +51,23 @@ void VisionTracker::TrackMonocularLocal(ImageFrame& f)
             std::lock_guard<std::mutex> lock(mRefFrameMutex);
             refF = refFrame;
         }
-        TrackByRefFrame(*refF, f);
+
+        cout << endl;
+
+        //TrackByRefFrame(*refF, f);
+        TIME_BEGIN();
+        TrackByLastFrame(f);
+        TIME_END("TrackByLastFrame");
+
+        TIME_BEGIN();
+        TrackLocalMap(f);
+        TIME_END("TrackLocalMap");
+
+
+        mR = f.R.clone();
+        mt = f.t.clone();
+
+        AddTrace(f);    // add camera trace
     }
 }
 
@@ -56,10 +77,10 @@ void VisionTracker::TrackByRefFrame(ImageFrame& ref, ImageFrame& f)
     // optical flow from last
     double ratio;
     if (isFirstFellow) {
-        ratio = f.opticalFlowFAST(ref);
+        ratio = f.opticalFlowMeasure(ref);
         isFirstFellow = false;
     } else {
-        ratio = f.opticalFlowFAST(lastFrame);
+        ratio = f.opticalFlowMeasure(lastFrame);
     }
     lastFrame = f;
     ratio = ratio / (double)ref.measure2ds.size();
@@ -103,8 +124,9 @@ void VisionTracker::TrackByRefFrame(ImageFrame& ref, ImageFrame& f)
     cout << t << endl;
 
     // BA
+    vector<int> inliers;
     TIME_BEGIN();
-    BA3D2D(pt3d, pt2d, R, t);
+    BA3D2D(pt3d, pt2d, R, t, inliers);
     TIME_END("BA3D2D");
     cout << "BA res:" << endl;
     cout << R << endl;
@@ -123,10 +145,84 @@ void VisionTracker::TrackByRefFrame(ImageFrame& ref, ImageFrame& f)
     f.t = mt.clone();
 }
 
+void VisionTracker::TrackByLastFrame(ImageFrame& f)
+{
+
+    // optical flow from last
+    double ratio;
+    if (isFirstFellow) {
+        ratio = f.opticalFlowMeasure(*refFrame, -1);
+        isFirstFellow = false;
+    } else {
+        ratio = f.opticalFlowMeasure(lastFrame, -1);
+    }
+    lastFrame = f;
+    //ratio = ratio / (double)refFrame->measure2ds.size();
+    printf("TrackFeature OpticalFlow num: %f\n", ratio);
+
+    // track relative pose 3d-2d
+    vector< cv::Point3f > pt3d;
+    vector< cv::Point2f > pt2d;
+    vector< Measure3D* > m3ds;
+    pt3d.reserve(f.measure2ds.size());
+    pt2d.reserve(f.measure2ds.size());
+    m3ds.reserve(f.measure2ds.size());
+
+    for (int i = 0, _end = (int)f.measure2ds.size(); i < _end; i++) {
+
+        Measure2D* pMea = &(f.measure2ds[i]);
+        Measure2D* pRefMea = pMea->ref2d;
+
+        if (pMea->valid && pRefMea->valid && pRefMea->ref3d != NULL && pRefMea->ref3d->valid) {
+            
+            // push back points
+            cv::Point3f p = pRefMea->ref3d->pt;
+            pt3d.push_back(p);              // 3d points
+            pt2d.push_back(pMea->undisPt);  // 2d points
+            m3ds.push_back(pRefMea->ref3d);
+
+            // bind measure2d and measure3d
+            pMea->ref3d = pRefMea->ref3d;
+        }
+    }
+
+    cv::Mat R, r, t;
+
+    // solve pnp ransac
+    cv::Mat KMat = (cv::Mat_<double>(3, 3) 
+            << K->fx, 0, K->cx, 0, K->fy, K->cy, 0, 0, 1);
+    TIME_BEGIN();
+    cv::solvePnPRansac(pt3d, pt2d, KMat, cv::Mat(), r, t);
+    TIME_END("Solve PnP");
+    cv::Rodrigues(r,R);
+    //cout << "solve pnp res:" << endl;
+    //cout << R << endl;
+    //cout << t << endl;
+
+    // BA
+    vector<int> inliers;
+    TIME_BEGIN();
+    //BA3D2DOnlyPose(pt3d, pt2d, R, t, inliers);
+    BA3D2D(pt3d, pt2d, R, t, inliers);
+    TIME_END("BA3D2D");
+    //cout << "BA res:" << endl;
+    //cout << R << endl;
+    //cout << t << endl;
+    
+    // update 3d points
+    //for (int i = 0, _end = (int)m3ds.size(); i < _end; i++ ) {
+    //    m3ds[i]->pt = pt3d[i];
+    //}
+
+    f.R = R.clone();
+    f.t = t.clone();
+
+}
+
 void VisionTracker::BA3D2D(
-        const vector< cv::Point3f > & points_3d,
-        const vector< cv::Point2f > & points_2d,
-        cv::Mat& R, cv::Mat& t)
+        vector< cv::Point3f > & points_3d,
+        vector< cv::Point2f > & points_2d,
+        cv::Mat& R, cv::Mat& t, vector<int> &inliers)
 {
     // g2o
     typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 6, landmark 3
@@ -141,7 +237,10 @@ void VisionTracker::BA3D2D(
     // Set Frame vertex
     g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
     pose->setId ( 0 );
-    pose->setEstimate ( g2o::SE3Quat() );
+    Eigen::Matrix3d R_mat;
+    cv::cv2eigen(R, R_mat);
+    pose->setEstimate ( g2o::SE3Quat(R_mat,
+                Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2))) );
     optimizer.addVertex ( pose );
 
     // Set MapPoint vertices
@@ -151,6 +250,7 @@ void VisionTracker::BA3D2D(
         g2o::VertexSBAPointXYZ* point = new g2o::VertexSBAPointXYZ();
         point->setId ( index++ );
         point->setEstimate ( Eigen::Vector3d ( p.x, p.y, p.z ) );
+        point->setFixed(true);
         point->setMarginalized ( true ); // g2o set marg 
         optimizer.addVertex ( point );
     }
@@ -163,6 +263,8 @@ void VisionTracker::BA3D2D(
     optimizer.addParameter ( camera );
 
     // Set 2d Point edges
+    vector< g2o::EdgeProjectXYZ2UV* > edges;
+    edges.reserve(points_2d.size());
     index = 1;
     for ( const cv::Point2f p:points_2d )
     {
@@ -175,12 +277,57 @@ void VisionTracker::BA3D2D(
         edge->setInformation ( Eigen::Matrix2d::Identity() );
         optimizer.addEdge ( edge );
         index++;
+
+        edges.push_back(edge);
     }
 
     //TIME_BEGIN()
-    optimizer.initializeOptimization();
-    optimizer.optimize ( 20 );
-    //TIME_END("g2o optimization")
+    //optimizer.initializeOptimization();
+    //optimizer.optimize ( 20 );
+    ////TIME_END("g2o optimization")
+    
+    inliers.resize(points_3d.size());
+    std::fill(inliers.begin(), inliers.end(), 1);
+
+    double chi2Thres = 3;
+    int nBad = 0;
+    for (int it = 0; it < 2; it++) {
+
+        cout << "Iter: " << it << endl;
+
+        pose->setEstimate ( g2o::SE3Quat(R_mat,
+                Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2))) );
+
+        //TIME_BEGIN()
+        optimizer.initializeOptimization(0);
+        optimizer.optimize ( 10 );
+        //TIME_END("g2o optimization")
+        
+        cout << "edge size: " << optimizer.edges().size() << endl;
+        
+        nBad = 0;
+        for (int i = 0, _end = (int)edges.size(); i < _end; i++) {
+
+            g2o::EdgeProjectXYZ2UV* e = edges[i];
+            
+            if (inliers[i] == 0) {
+                e->computeError();
+            }
+
+            if (e->chi2() > chi2Thres) {
+                inliers[i] = 0;
+                e->setLevel(1);
+                nBad++;
+            } else {
+                inliers[i] = 1;
+                e->setLevel(0);
+            }
+        }
+        cout << "nBad: " << nBad << endl;
+
+        if (optimizer.edges().size() < 10)
+            break;
+    }
 
     //cout<<endl<<"after optimization:"<<endl;
     //cout<<"T="<<endl<<Eigen::Isometry3d ( pose->estimate() ).matrix() <<endl;
@@ -189,8 +336,399 @@ void VisionTracker::BA3D2D(
     Eigen::Matrix4d T = Eigen::Isometry3d ( pose->estimate() ).matrix();
     cv::Mat res;
     cv::eigen2cv(T, res);
-    R = res.rowRange(0,3).colRange(0,3);
-    t = res.rowRange(0,3).col(3);
+    R = res(cv::Rect(0,0,3,3)).clone();
+    t = res(cv::Rect(3,0,1,3)).clone();
+
+    //// log some information
+    //cout << "pints 3d before BA:" << endl;
+    //for (const cv::Point3f p:points_3d) {
+    //    cout << p << endl;
+    //} 
+
+    //cout << "points 3d after BA:" << endl;
+    //for (int i = 0; i < points_3d.size(); i++ ) {
+    //    g2o::VertexSBAPointXYZ* vertex = dynamic_cast< g2o::VertexSBAPointXYZ* >
+    //            ( optimizer.vertex(1+i) );
+    //    Eigen::Vector3d p = vertex->estimate();
+    //    cout << cv::Point3f(p[0], p[1], p[2]) << endl;
+    //    //points_3d[i] = cv::Point3f(p[0], p[1], p[2]);
+    //}
+
+    //cout << "edge errors:" << endl;
+    //for (int i = 0; i < points_3d.size(); i++) {
+    //    g2o::EdgeProjectXYZ2UV* e = edges[i];
+    //    e->computeError();
+    //    cout << e->chi2() << endl;
+    //}
+
+}
+
+void VisionTracker::BA3D2DOnlyPose(
+        vector< cv::Point3f > & points_3d,
+        vector< cv::Point2f > & points_2d,
+        cv::Mat& R, cv::Mat& t, vector<int> &inliers)
+{
+    // g2o
+    typedef g2o::BlockSolver< g2o::BlockSolverTraits<6,3> > Block;  // pose 6, landmark 3
+    Block::LinearSolverType* linearSolver = 
+        new g2o::LinearSolverCSparse<Block::PoseMatrixType>(); // linearSolver
+    Block* solver_ptr = new Block ( linearSolver );     // blockSolver
+    g2o::OptimizationAlgorithmLevenberg* solver = 
+        new g2o::OptimizationAlgorithmLevenberg ( solver_ptr );
+    g2o::SparseOptimizer optimizer;
+    optimizer.setAlgorithm ( solver );
+
+    // Set Frame vertex
+    g2o::VertexSE3Expmap* pose = new g2o::VertexSE3Expmap(); // camera pose
+    pose->setId ( 0 );
+    Eigen::Matrix3d R_mat;
+    cv::cv2eigen(R, R_mat);
+    pose->setEstimate ( g2o::SE3Quat(R_mat,
+                Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2))) );
+    pose->setFixed(false);
+    optimizer.addVertex ( pose );
+
+    // Set 2d Point edges
+    vector< g2o::EdgeSE3ProjectXYZOnlyPose* > edges;
+    edges.reserve(points_2d.size());
+    for ( int i = 0, _end = (int)points_2d.size(); i < _end; i++ )
+    {
+        g2o::EdgeSE3ProjectXYZOnlyPose* edge = new g2o::EdgeSE3ProjectXYZOnlyPose();
+        edge->setVertex ( 0, pose );
+        edge->setMeasurement ( Eigen::Vector2d ( points_2d[i].x, points_2d[i].y ) );
+        edge->setInformation ( Eigen::Matrix2d::Identity() );
+
+        g2o::RobustKernelHuber* rk = new g2o::RobustKernelHuber;
+        rk->setDelta(2.447);
+        edge->setRobustKernel(rk);
+
+        edge->fx = K->fx;
+        edge->fy = K->fy;
+        edge->cx = K->cx;
+        edge->cy = K->cy;
+
+        edge->Xw[0] = points_3d[i].x;
+        edge->Xw[1] = points_3d[i].y;
+        edge->Xw[2] = points_3d[i].z;
+
+        optimizer.addEdge ( edge );
+
+        edges.push_back(edge);
+    }
+
+    inliers.resize(points_2d.size());
+    std::fill(inliers.begin(), inliers.end(), 1);
+
+    const float chi2Mono[4]={5.991,5.991,5.991,5.991};
+    const int its[4]={10,10,10,10};
+
+    cout << "BA points size: " << points_2d.size() << endl;
+
+    int nBad = 0;
+    for (int it = 0; it < 2; it++) {
+
+        cout << "iter: " << it << endl;
+
+        pose->setEstimate ( g2o::SE3Quat(R_mat,
+                Eigen::Vector3d(t.at<double>(0), t.at<double>(1), t.at<double>(2))) );
+
+        //TIME_BEGIN()
+        optimizer.initializeOptimization(0);
+        optimizer.optimize ( its[it] );
+        //TIME_END("g2o optimization")
+        
+        cout << "edge size: " << optimizer.edges().size() << endl;
+        
+        nBad = 0;
+        for (int i = 0, _end = (int)edges.size(); i < _end; i++) {
+
+            g2o::EdgeSE3ProjectXYZOnlyPose* e = edges[i];
+            
+            if (inliers[i] == 0) {
+                e->computeError();
+            }
+
+            if (e->chi2() > chi2Mono[it]) {
+                inliers[i] = 0;
+                e->setLevel(1);
+                nBad++;
+            } else {
+                inliers[i] = 1;
+                e->setLevel(0);
+            }
+
+            if (it==2) {
+                e->setRobustKernel(0);
+            }
+
+        }
+
+        cout << "nBad: " << nBad << endl;
+
+        if (optimizer.edges().size() < 10)
+            break;
+    }
+
+    // set optimization result back, do not forget this step
+    Eigen::Matrix4d T = Eigen::Isometry3d ( pose->estimate() ).matrix();
+    cv::Mat res;
+    cv::eigen2cv(T, res);
+    R = res(cv::Rect(0,0,3,3)).clone();
+    t = res(cv::Rect(3,0,1,3)).clone();
+
+}
+
+// project and wrap to suitable level, search based on extracted FAST 
+void VisionTracker::TrackLocalMap(ImageFrame& f)
+{
+
+    // result to show, only for dev
+    vector< cv::Point2f > pt1, pt2;
+    vector< int > l1, l2;
+    vector< cv::Point2f > pflow, pProj;
+    vector< Measure3D* > p3d;
+    vector< Measure2D* > ptrTrackedM2d;
+
+    pt1.reserve(map->mapPoints.size());
+    pt2.reserve(map->mapPoints.size());
+    l1.reserve(map->mapPoints.size());
+    l2.reserve(map->mapPoints.size());
+    pflow.reserve(map->mapPoints.size());
+    pProj.reserve(map->mapPoints.size());
+    p3d.reserve(map->mapPoints.size());
+    ptrTrackedM2d.reserve(map->mapPoints.size());
+    // end
+
+    // extract FAST
+    TIME_BEGIN();
+    f.extractFASTGrid();
+    TIME_END("extractFAST");
+
+    // project each tracked map point to image frame f
+    double *_R = f.R.ptr<double>(0);
+    double *_t = f.t.ptr<double>(0);
+    cv::Mat A = (K->CamK)*f.R*(K->CamKinv);
+
+    ImageFrame* pF;
+    for (int i = 0, _end = (int)f.measure2ds.size(); i < _end; i++) {
+
+        if (f.measure2ds[i].ref3d == NULL)
+            continue;
+
+        Measure3D* pM3d = f.measure2ds[i].ref3d;
+        Measure2D* pM2d = pM3d->ref2d;
+        pF = pM2d->refFrame;
+
+        //cout << endl << " For 3d point: " << pM3d->pt << endl;
+        //cout << "Ref 2d point: " << pM2d->pt << endl;
+
+        // for dev
+        p3d.push_back(pM3d);
+        pt1.push_back(pM2d->pt);
+        l1.push_back(pM2d->levelIdx);
+
+        double X = _R[0]*pM3d->pt.x+_R[1]*pM3d->pt.y+_R[2]*pM3d->pt.z+_t[0];
+        double Y = _R[3]*pM3d->pt.x+_R[4]*pM3d->pt.y+_R[5]*pM3d->pt.z+_t[1];
+        double Z = _R[6]*pM3d->pt.x+_R[7]*pM3d->pt.y+_R[8]*pM3d->pt.z+_t[2];
+
+        cv::Point2f pt2d = K->Proj3Dto2D(X, Y, Z);
+
+        // for dev
+        //pProj.push_back(pt2d);
+        // end
+        //cout << "Project 2d point: " << pt2d << endl;
+        // TODO::distort projected pt2d
+        
+        // compute wrap
+        cv::Mat A_ = A * pM3d->pt.z / Z;
+
+        //cv::Mat B_ = B / Z;
+        //cv::Mat uv_ori(3, 1, CV_64FC1);
+        //uv_ori.at<double>(0) = pM2d->undisPt.x;
+        //uv_ori.at<double>(1) = pM2d->undisPt.y;
+        //uv_ori.at<double>(2) = 1;
+        //cv::Mat uv_new = A_ * uv_ori + B_;
+        //cout << endl << "uv_new wrap: " << uv_new << endl;
+        //cout << "uv_new proj: " << pt2d << endl;
+        //cout << "A_: " << A_ << endl;
+
+        cv::Mat wrapM = A_(cv::Rect(0,0,2,2)).clone();
+        double* M_ = wrapM.ptr<double>(0);
+
+        //cout << "wrapM: " << wrapM << endl;
+        double area = M_[0] * M_[3] - M_[1] * M_[2];
+        //cout << "area: " << area << endl;
+
+        int searchLevel = pM2d->levelIdx;
+        //cout << "ori level: " << searchLevel << endl;
+
+        while (area > 3 && searchLevel < 3) {
+            searchLevel++;
+            area *= 0.25;
+        }
+
+        if (area > 3 || area < 0.25) {
+            // TODO::too near or too far
+        }
+        //printf("search level: %d\n", searchLevel);
+        
+        // search around pt2d
+        bool matchFinded = false;
+        double sec_best_score = 999999.;
+        int sec_best_x, sec_best_y;
+
+        double best_score = 999999.;
+        int best_x, best_y;
+
+        double scaleFactor = f.levels[searchLevel].scaleFactor;
+        //cout << "ScaleFactor: " << scaleFactor << endl;
+
+        double distThre = 49;
+        //cout << "dist threshold: " << distThre << endl;
+
+        for (cv::Point2f pt:f.levels[searchLevel].points) {
+
+            //cout << "ori level fast point: " << pt << endl;
+
+            double sx = pt.x * scaleFactor;
+            double sy = pt.y * scaleFactor;
+
+            //cout << "FAST position: " << sx << " " << sy << endl;
+            //cout << "Project position: " << pt2d.x << " " << pt2d.y << endl;
+
+            double dist = (pt2d.x-sx)*(pt2d.x-sx) + (pt2d.y-sy)*(pt2d.y-sy);
+
+            if ( dist >  distThre) {
+                continue;
+            }
+
+            cv::Point2f sp(sx, sy);
+            double score = SSD(pF->levels[0].image, pM2d->pt, pM2d->levelIdx,
+                    f.levels[0].image, sp, searchLevel, M_);
+            //cout << "similarity: " << score << endl;
+
+            if (score > 10000)
+                continue;
+
+            if (score < best_score) {
+                best_score = score;
+                best_x = sx;
+                best_y = sy;
+                matchFinded = true;
+            } else if (score < sec_best_score) {
+                sec_best_score = score;
+                sec_best_x = sx;
+                sec_best_y = sy;
+            }
+
+        }
+
+        // for dev
+        if (matchFinded) {
+            pt2.push_back(cv::Point2f(best_x, best_y));
+            f.measure2ds[i].pt = cv::Point2f(best_x, best_y);
+            f.measure2ds[i].undisPt = K->undistort(best_x, best_y);
+        }
+        else {
+            pt2.push_back(cv::Point2f(-1, -1));
+        }
+        l2.push_back(searchLevel);
+        // end
+        
+    }
+
+    // refine pose
+    // track relative pose 3d-2d
+    vector< cv::Point3f > pt3d;
+    vector< cv::Point2f > pt2d;
+    vector< int > idxs;
+    pt3d.reserve(p3d.size());
+    pt2d.reserve(p3d.size());
+    idxs.reserve(p3d.size());
+
+    for (int i = 0, _end = (int)pt1.size(); i < _end; i++) {
+
+        if (pt2[i].x < 0)
+            continue;
+
+        if (!p3d[i]->valid)
+            continue;
+
+        // push back points
+        pt3d.push_back(p3d[i]->pt);              // 3d points
+        pt2d.push_back(pt2[i]);  // 2d points
+        idxs.push_back(i);
+    }
+
+    // BA
+    cout << "refine points num: " << pt3d.size() << endl;
+    vector<int> inliers;
+    TIME_BEGIN();
+    //BA3D2DOnlyPose(pt3d, pt2d, f.R, f.t, inliers);
+    BA3D2D(pt3d, pt2d, f.R, f.t, inliers);
+    TIME_END("fefine BA3D2D");
+    //cout << "fefine BA res:" << endl;
+    //cout << f.R << endl;
+    //cout << f.t << endl;
+    
+    for (int i = 0, _end = (int)inliers.size(); i < _end; i++) {
+        if (inliers[i]==0) {
+            int idx = idxs[i];
+            p3d[idx]->outlierNum++;
+            if (p3d[idx]->outlierNum > 3) {
+                p3d[idx]->valid = false;
+            }
+        }
+    }
+
+    // draw result, for dev
+    cv::Mat res(480, 640*2, CV_8UC3);
+    cv::Mat region1(res, cv::Rect(0, 0, 640, 480));
+    cv::Mat region2(res, cv::Rect(640, 0, 640, 480));
+    cv::cvtColor(pF->levels[0].image, region1, CV_GRAY2BGR);
+    cv::cvtColor(f.levels[0].image, region2, CV_GRAY2BGR);
+    cv::Scalar color(0, 255, 0);
+    for (int i = 0, _end = (int)pt1.size(); i < _end; i++) {
+
+        if (pt2[i].x < 0)
+            continue;
+
+        // draw match point
+        cv::Scalar rcolor(rand()%255,rand()%255,rand()%255);
+        cv::circle(res, pt1[i], 3.5*(1<<l1[i]), 
+                rcolor);
+        cv::circle(res, cv::Point2f(pt2[i].x+640, pt2[i].y),
+                3.5*(1<<l2[i]), 
+                rcolor);
+        cv::line(res, pt1[i], 
+                cv::Point2f(pt2[i].x+640, pt2[i].y),
+                rcolor);
+
+        //if (pflow[i].x < 0)
+        //    continue;
+
+        //if (cv::norm(pflow[i] - pt2[i]) < 3)
+        //    continue;
+
+        //// draw flow point
+        //cv::circle(res, cv::Point2f(pflow[i].x+640, pflow[i].y),
+        //        3.5*(1<<l1[i]), cv::Scalar(0,0,255));
+        //cv::line(res, cv::Point2f(pflow[i].x+640, pflow[i].y), 
+        //        cv::Point2f(pt2[i].x+640, pt2[i].y),
+        //        cv::Scalar(0,0,255));
+
+        // draw proj point
+        //cv::circle(res, cv::Point2f(pProj[i].x+640, pProj[i].y),
+        //        3.5*(1<<l1[i]), cv::Scalar(255,0,0));
+        //cv::line(res, cv::Point2f(pProj[i].x+640, pProj[i].y), 
+        //        cv::Point2f(pt2[i].x+640, pt2[i].y),
+        //        cv::Scalar(255, 0, 0));
+
+    }
+
+    cv::imshow("match", res);
+    //cv::waitKey(-1);
+    // end
 
 }
 
@@ -1281,6 +1819,12 @@ void VisionTracker::reset()
 //    lastFrame = *kf;
 //}
 
+void VisionTracker::AddTrace(ImageFrame& f)
+{
+    RSequence.push_back(f.R.clone());
+    tSequence.push_back(f.t.clone());
+}
+
 cv::Mat VisionTracker::GetTwcMatNow()
 {
 
@@ -1305,4 +1849,94 @@ cv::Mat VisionTracker::GetTcwMatNow()
     Rt.copyTo(res.rowRange(0,3).colRange(0,3));
     _t.copyTo(res.rowRange(0,3).col(3));
     return res;
+}
+
+vector< cv::Mat > VisionTracker::GetTcwMatSequence()
+{
+   if (RSequence.empty() || tSequence.empty()) 
+       return vector< cv::Mat >();
+
+   vector< cv::Mat > resv;
+   for (int i = 0, _end = (int)RSequence.size(); i < _end; i++) {
+       cv::Mat res = cv::Mat::eye(4, 4, CV_64FC1);
+       cv::Mat Rt = RSequence[i].t();
+       cv::Mat _t = -Rt*tSequence[i];
+       Rt.copyTo(res.rowRange(0,3).colRange(0,3));
+       _t.copyTo(res.rowRange(0,3).col(3));
+       resv.push_back(res);
+   }
+
+   return resv;
+}
+
+double VisionTracker::ZMSSD(cv::Mat& img1, cv::Point2f& pt1, int level1, 
+                     cv::Mat& img2, cv::Point2f& pt2, int level2, 
+                     cv::Mat &wrapM) 
+{
+    double scale1 = (1 << level1);
+    double scale2 = (1 << level2);
+
+    double *W = wrapM.ptr<double>(0);
+
+    // mean 1
+    double mean1 = 0;
+    int count = 0;
+    for (int dx = -3; dx < 4; dx++) {
+        for (int dy = -3; dy < 4; dy++) {
+            mean1 += img1.at<unsigned char>(pt1.y + dy*scale1, pt1.x + dx*scale1);
+            count++;
+        }
+    }
+    mean1 /= count;
+
+    // mean 2
+    double mean2 = 0;
+    count = 0;
+    for (int dx = -3; dx < 4; dx++) {
+        for (int dy = -3; dy < 4; dy++) {
+            double wdx = W[0] * dx + W[1] * dy;
+            double wdy = W[2] * dx + W[3] * dy;
+            mean2 += img2.at<unsigned char>(pt2.y + wdy*scale2, pt2.x + wdx*scale2);
+            count++;
+        }
+    }
+    mean2 /= 49;
+
+    // SSD 
+    double SSD = 0;
+    for (int dx = -3; dx < 4; dx++) {
+        for (int dy = -3; dy < 4; dy++) {
+            double wdx = W[0] * dx + W[1] * dy;
+            double wdy = W[2] * dx + W[3] * dy;
+            double pix1 = img1.at<unsigned char>(pt1.y + dy*scale1, pt1.x + dx*scale1) - mean1;
+            double pix2 = img2.at<unsigned char>(pt2.y + wdy*scale2, pt2.x + wdx*scale2) - mean2;
+            SSD = SSD + (pix2 - pix1)*(pix2 - pix1);
+        }
+    }
+
+    return SSD;
+}
+
+double VisionTracker::SSD(cv::Mat& img1, cv::Point2f& pt1, int level1, 
+                     cv::Mat& img2, cv::Point2f& pt2, int level2, 
+                     double *M) 
+{
+    double scale1 = (1 << level1);
+    double scale2 = (1 << level2);
+
+    // SSD 
+    double SSD = 0;
+    for (int dx = -3; dx < 4; dx++) {
+        for (int dy = -3; dy < 4; dy++) {
+            double wdx = M[0] * dx + M[1] * dy;
+            double wdy = M[2] * dx + M[3] * dy;
+            double pix1 = img1.at<unsigned char>
+                    (pt1.y + dy*scale1, pt1.x + dx*scale1);
+            double pix2 = img2.at<unsigned char>
+                    (pt2.y + wdy*scale2, pt2.x + wdx*scale2);
+            SSD = SSD + (pix2 - pix1)*(pix2 - pix1);
+        }
+    }
+
+    return SSD;
 }

@@ -30,7 +30,9 @@
 #include <g2o/solvers/csparse/linear_solver_csparse.h>
 #include <g2o/solvers/dense/linear_solver_dense.h>
 #include <g2o/types/sba/types_six_dof_expmap.h>
+#include <g2o/core/robust_kernel_impl.h>
 
+#include "G2OExtend.h"
 #include "CameraIntrinsic.h"
 #include "ImageFrame.h"
 #include "MedianFilter.h"
@@ -63,6 +65,10 @@ class VisionTracker
 
         int countFromLastKeyFrame;
 
+        vector< cv::Mat > RSequence, tSequence;
+
+        set< ImageFrame* > refFrames;
+
         VisionTracker() = default;
         VisionTracker(CameraIntrinsic* _K, Mapping* _map):
             state(NOTINITIALIZED), 
@@ -73,14 +79,16 @@ class VisionTracker
             initializer(_map)
             { };
 
+        void reset();
         void TrackMonocular(ImageFrame& f);
         void TrackMonocularLocal(ImageFrame& f);
         //void TrackMonocularNewKeyFrame(ImageFrame& f);
         //void TryInitialize(ImageFrame& f);
         //void TryInitializeByG2O(ImageFrame& f);
-        void reset();
 
         void TrackByRefFrame(ImageFrame& ref, ImageFrame& f);
+        void TrackByLastFrame(ImageFrame& f);
+        void TrackLocalMap(ImageFrame& f);
         //void InsertKeyFrame(ImageFrame& kf, ImageFrame& f);
         //void TrackPose2D2D(const ImageFrame& lf, ImageFrame& rf );
         //void TrackPose2D2DG2O(ImageFrame& lf, ImageFrame& rf );
@@ -90,17 +98,35 @@ class VisionTracker
 
         //double TrackFeatureOpticalFlow(ImageFrame& kf, ImageFrame& f);
         //void updateRefFrame(ImageFrame* kf);
+        
+        void AddTrace(ImageFrame& f);
 
         cv::Mat GetTwcMatNow();
         cv::Mat GetTcwMatNow();
 
+        vector< cv::Mat > GetTcwMatSequence();
+
         MedianFilter<5> medianFilter[6];
 
     private:
-        void BA3D2D(const vector< cv::Point3f > & points_3d,
-                const vector< cv::Point2f > & points_2d,
+        void BA3D2D(vector< cv::Point3f > & points_3d,
+                vector< cv::Point2f > & points_2d,
                 cv::Mat& R, 
-                cv::Mat& t);
+                cv::Mat& t,
+                vector<int> &inliers);
+
+        void BA3D2DOnlyPose(vector< cv::Point3f > & points_3d,
+                vector< cv::Point2f > & points_2d,
+                cv::Mat& R, 
+                cv::Mat& t,
+                vector<int> &inliers);
+
+        double ZMSSD(cv::Mat& img1, cv::Point2f& pt1, int level1, 
+                     cv::Mat& img2, cv::Point2f& pt2, int level2, 
+                     cv::Mat &wrapM);
+        double SSD(cv::Mat& img1, cv::Point2f& pt1, int level1, 
+                     cv::Mat& img2, cv::Point2f& pt2, int level2, 
+                     double *M);
 
         Initializer initializer;
 

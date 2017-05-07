@@ -65,6 +65,7 @@ int main(int argc, char** argv)
         if (cmd == 's') {
             refImgFrame = new ImageFrame(Frame, &K1); 
             refImgFrame->extractFAST();
+            refImgFrame->setFASTAsMeasure();
             lastFrame = *refImgFrame;
             isFirst = true;
         } else {                                
@@ -78,10 +79,10 @@ int main(int argc, char** argv)
                 // optical flow result
                 TIME_BEGIN();
                 if (isFirst) {
-                    newImgFrame.opticalFlowFAST(*refImgFrame);
+                    newImgFrame.opticalFlowMeasure(*refImgFrame);
                     isFirst = false;
                 } else {
-                    newImgFrame.opticalFlowFAST(lastFrame);
+                    newImgFrame.opticalFlowMeasure(lastFrame);
                 }
                 TIME_END("OpticalFlowTrackedFast");
 

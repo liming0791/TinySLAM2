@@ -30,6 +30,8 @@ void Viewer::run()
 
         drawCameraNow();
 
+        drawCameraTrace();
+
         drawKeyFrames();
 
         drawMapPoints();
@@ -75,6 +77,8 @@ void Viewer::requestDraw()
     glClearColor(1.f, 1.f, 1.f, 1.f);
 
     drawCameraNow();
+
+    drawCameraTrace();
 
     drawKeyFrames();
 
@@ -127,6 +131,55 @@ void Viewer::drawCameraNow()
         glEnd();
 
         glPopMatrix();
+    }
+
+}
+
+void Viewer::drawCameraTrace()
+{
+    const float w = 0.3;
+    const float h = w;
+    const float z = w;
+
+    if (tracker == NULL)
+        return;
+
+    //printf("Draw camera trace, sequence size: %d ..\n", 
+    //        tracker->RSequence.size());
+
+    if (!tracker->RSequence.empty()) {
+
+        vector< cv::Mat > Tcws = tracker->GetTcwMatSequence();
+
+        for (cv::Mat Tcw:Tcws) {
+            cv::Mat Tcwt = Tcw.t();
+            glPushMatrix();
+
+            glMultMatrixd(Tcwt.ptr<double>(0));
+
+            glLineWidth(1.5);
+
+            glColor3f(0.0f,1.0f,0.0f);
+            glBegin(GL_LINES);
+            glVertex3f(0,0,0);
+            glVertex3f(h,0,0);
+            glEnd();
+
+            glColor3f(1.0f,0.0f,0.0f);
+            glBegin(GL_LINES);
+            glVertex3f(0,0,0);
+            glVertex3f(0,z,0);
+            glEnd();
+
+            glColor3f(0.0f,0.0f,1.0f);
+            glBegin(GL_LINES);
+            glVertex3f(0,0,0);
+            glVertex3f(0,0,h);
+            glEnd();
+
+            glPopMatrix();
+        }
+        
     }
 
 }
@@ -202,11 +255,15 @@ void Viewer::drawMapPoints()
 
     glPointSize(3);
     glBegin(GL_POINTS);
-    glColor3f(1.0,0.0,0.0);
 
     for (std::set< Measure3D* >::iterator s_it = map->mapPoints.begin(), 
             s_end = map->mapPoints.end(); s_it != s_end; s_it++) {
         Measure3D* pt = (*s_it);
+        if (pt->valid) {
+            glColor3f(1.0,0.0,0.0);
+        } else {
+            glColor3f(0.0,0.0,0.0);
+        }
         glVertex3f(pt->pt.x, pt->pt.y, pt->pt.z);
     }
 

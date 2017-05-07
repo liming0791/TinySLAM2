@@ -1,4 +1,5 @@
 #include "Mapping.h"
+#include "Converter.h"
 //#include "VisionTracker.h"
 
 Measure3D::Measure3D(const cv::Point3f &p)
@@ -236,4 +237,89 @@ void Mapping::ClearMap()
             delete(p);
     }
     keyFrames.clear();
+}
+
+void Mapping::Save(char* filename)
+{
+
+    FILE* of = fopen(filename, "wb");
+
+    // save map points
+    int pt_num = mapPoints.size();
+    fwrite(&pt_num, sizeof(int), 1, of);
+    for (std::set< Measure3D* >::iterator iter = mapPoints.begin(), 
+            i_end = mapPoints.end(); iter != i_end; iter++) {
+        Measure3D *pM3D = *iter;
+        fwrite(&(pM3D->pt.x), sizeof(float), 1, of);
+        fwrite(&(pM3D->pt.y), sizeof(float), 1, of);
+        fwrite(&(pM3D->pt.z), sizeof(float), 1, of);
+    }
+
+    printf("save %d map points\n", pt_num);
+    
+    // save map keyFrames
+    int kf_num = keyFrames.size();
+    fwrite(&kf_num, sizeof(int), 1, of);
+    for (std::set< ImageFrame* >::iterator iter = keyFrames.begin(), 
+            i_end = keyFrames.end(); iter != i_end; iter++) {
+        ImageFrame *kf = *iter;
+        fwrite(kf->R.data, sizeof(double), 9, of);
+        fwrite(kf->t.data, sizeof(double), 3, of);
+
+        cout << "save R: " << Converter::getImageType(kf->R.type()) << endl;
+        cout << kf->R << endl;
+
+        cout << "save t: " << endl;
+        cout << kf->t << endl;
+    }
+
+    printf("save %d keyframes\n", kf_num);
+
+    fclose(of);
+}
+
+void Mapping::Load(char *filename)
+{
+    FILE* inf = fopen(filename, "rb");
+
+    // load map points
+    int pt_num;
+    fread(&pt_num, sizeof(int), 1, inf);
+    for (int i = 0; i < pt_num; i++ ) {
+        float x, y, z;
+        fread(&x, sizeof(float), 1, inf);
+        fread(&y, sizeof(float), 1, inf);
+        fread(&z, sizeof(float), 1, inf);
+
+        Measure3D *pM3D = new Measure3D(cv::Point3f(x, y, z));
+        mapPoints.insert(pM3D);
+    }
+    
+    printf("load %d map points\n", pt_num);
+
+    // load map keyFrames
+    int kf_num;
+    fread(&kf_num, sizeof(int), 1, inf);
+    for (int i = 0; i < kf_num; i++) {
+        cv::Mat R(3, 3, CV_64FC1);
+        cv::Mat t(3, 1, CV_64FC1);
+        fread(R.data, sizeof(double), 9, inf);
+        fread(t.data, sizeof(double), 3, inf);
+
+        ImageFrame *f = new ImageFrame();
+        f->R = R.clone();
+        f->t = t.clone();
+
+        keyFrames.insert(f);
+
+        cout << "load R: " << endl;
+        cout << f->R << endl;
+
+        cout << "load t: " << endl;
+        cout << f->t << endl;
+    }
+
+    printf("load %d keyframes\n", kf_num);
+
+    fclose(inf);
 }

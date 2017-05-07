@@ -68,6 +68,7 @@ include_directories(
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 add_library(${PROJECT_NAME} SHARED
+    src/G2OExtend.cc
     src/CameraIntrinsic.cc
     src/CameraDevice.cc
     src/ImageFrame.cc
@@ -78,6 +79,7 @@ add_library(${PROJECT_NAME} SHARED
     src/Converter.cc
     src/MedianFilter.cc
     src/Initializer.cc
+    src/ThirdPartyInit.cc
 )
 
 target_link_libraries(${PROJECT_NAME}
@@ -117,3 +119,11 @@ target_link_libraries(testInitialize ${OpenCV_LIBRARIES} ${PROJECT_NAME} )
 add_executable(testTrackLocal
     test/tracklocal.cc)
 target_link_libraries(testTrackLocal ${OpenCV_LIBRARIES} ${PROJECT_NAME} )
+
+add_executable(testInitializeThirdParty
+    test/initializethirdparty.cc)
+target_link_libraries(testInitializeThirdParty ${OpenCV_LIBRARIES} ${PROJECT_NAME} )
+
+add_executable(testLoadMap
+    test/loadmap.cc)
+target_link_libraries(testLoadMap ${OpenCV_LIBRARIES} ${PROJECT_NAME} )

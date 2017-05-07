@@ -47,6 +47,7 @@ class Measure2D
     public:
 
         ImageFrame *refFrame;
+
         cv::Point2f pt;
         cv::Point2f undisPt;
         int levelIdx;
@@ -57,19 +58,24 @@ class Measure2D
         Measure3D* ref3d;
         Measure2D* ref2d;
 
+        bool isSelfReference;
+
         Measure2D() = default;
-        Measure2D(cv::Point2f& _pt, 
-                cv::Point2f& _undisPt, 
-                ImageFrame* _refFrame,
-                int _levelIdx)
-            :refFrame(_refFrame),
-            pt(_pt), 
-            undisPt(_undisPt),
-            levelIdx(_levelIdx),
-            outlierNum(0),
-            valid(true),
-            ref3d(NULL),
-            ref2d(this){};
+
+        Measure2D(const cv::Point2f& _pt, 
+                  const cv::Point2f& _undisPt, 
+                  ImageFrame* _refFrame,
+                  int _levelIdx):   refFrame(_refFrame),
+                                    pt(_pt), 
+                                    undisPt(_undisPt),
+                                    levelIdx(_levelIdx),
+                                    outlierNum(0),
+                                    valid(true),
+                                    ref3d(NULL),
+                                    ref2d(this),
+                                    isSelfReference(true){};
+        Measure2D(const Measure2D& m2d);
+        void operator=(const Measure2D& m2d);
 };
 
 class ImageFrame
@@ -100,7 +106,9 @@ class ImageFrame
         void operator=(const ImageFrame& imgFrame);
 
         void extractFAST(int lowNum = 400, int highNum = 500);
-        int opticalFlowFAST(ImageFrame& refFrame);
+        void extractFASTGrid(int lowNum = 400, int highNum = 500);
+        void setFASTAsMeasure();
+        int opticalFlowMeasure(ImageFrame& refFrame, int number = -1);
         int opticalFlowFASTAndValidate(ImageFrame& refFrame);
         void opticalFlowTrackedFAST(ImageFrame& lastFrame);
 

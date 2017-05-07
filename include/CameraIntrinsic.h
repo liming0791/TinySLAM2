@@ -25,6 +25,9 @@ class CameraIntrinsic
         int width;
         int height;
 
+        cv::Mat CamK;
+        cv::Mat CamKinv;
+
         CameraIntrinsic() = default;
         explicit CameraIntrinsic(const string& fileName);
         CameraIntrinsic(double _cx, double _cy, double _fx, double _fy, double _k1, double _k2,

@@ -87,7 +87,7 @@ int main(int argc, char** argv)
 
                 if (!isInited) {
                     isInited = initializer.
-                        TryInitialize(&newImgFrame);
+                        TryInitializeByThirdParty(&newImgFrame);
                     // draw optical flow
                     for (int i = 0, _end = 
                             (int)newImgFrame.measure2ds.size(); 

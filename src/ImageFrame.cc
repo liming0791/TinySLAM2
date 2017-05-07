@@ -10,6 +10,38 @@ ImageLevel::ImageLevel(cv::Mat& im, int idx, double scale):
 
 }
 
+Measure2D::Measure2D(const Measure2D& m2d):
+    refFrame(m2d.refFrame), pt(m2d.pt), undisPt(m2d.undisPt),
+    levelIdx(m2d.levelIdx), outlierNum(m2d.outlierNum), valid(m2d.valid),
+    ref3d(m2d.ref3d), ref2d(m2d.ref2d), isSelfReference(m2d.isSelfReference)
+{
+    if (isSelfReference) {
+        ref2d = this;
+    }
+}
+
+void Measure2D::operator=(const Measure2D& m2d)
+{
+    refFrame = m2d.refFrame;
+
+    pt = m2d.pt;
+    undisPt = m2d.undisPt;
+    levelIdx = m2d.levelIdx;
+
+    outlierNum = m2d.outlierNum;
+    valid = m2d.valid;
+
+    ref3d = m2d.ref3d;
+
+    isSelfReference = m2d.isSelfReference;
+
+    if (isSelfReference) {
+        ref2d = this;
+    } else {
+        ref2d = m2d.ref2d;
+    }
+}
+
 ImageFrame::ImageFrame(const cv::Mat& frame, CameraIntrinsic* _K): 
     //SBI(CVD::ImageRef(32, 24)), 
     R(cv::Mat::eye(3,3, CV_64FC1)), 
@@ -31,7 +63,6 @@ ImageFrame::ImageFrame(const cv::Mat& frame, CameraIntrinsic* _K):
     //cv::Mat s_img;
     //cv::resize(image, s_img, cv::Size(32, 24));
     //cv::blur(s_img, s_img, cv::Size(3,3));
-
     //memcpy(SBI.begin(), s_img.data, 32*24*sizeof(unsigned char));
     
     levels.reserve(4);
@@ -72,8 +103,6 @@ ImageFrame::ImageFrame(const ImageFrame& imgFrame):
     for (int i = 0, _end = (int)measure2ds.size(); 
             i < _end; i++ ) {
         measure2ds[i].refFrame = this;
-        if (isSelfReference)
-            measure2ds[i].ref2d = &(measure2ds[i]);
     }
 }
 
@@ -97,8 +126,6 @@ void ImageFrame::operator=(const ImageFrame& imgFrame)
     for (int i = 0, _end = (int)measure2ds.size(); 
             i < _end; i++ ) {
         measure2ds[i].refFrame = this;
-        if (isSelfReference)
-            measure2ds[i].ref2d = &(measure2ds[i]);
     }
 }
 
@@ -153,6 +180,66 @@ void ImageFrame::extractFAST(int lowNum, int highNum)
                 i, keyPoints.size());
     }
 
+}
+
+void ImageFrame::extractFASTGrid(int lowNum, int highNum)
+{
+    int thres = 40;
+    int low = lowNum;
+    int high = highNum;
+
+    // extract FAST for each level
+    for (int i = 0; i < 4; i++) {
+
+        levels[i].points.reserve(1000/(i+1));
+
+        int imgW = levels[i].image.cols;
+        int imgH = levels[i].image.rows;
+
+        for (int x = 3; x < imgW-20; x+=20) {
+            for (int y = 3; y < imgH-20; y+=20) {
+                
+                int w = 20;
+                int h = 20;
+
+                if (x+20 >= imgW) {
+                    w = imgW - x - 3;
+                }
+
+                if (y+20 >= imgH) {
+                    h = imgH - y - 3;
+                }
+
+                cv::Rect ROI(x, y, w, h);
+
+                vector< cv::KeyPoint > keyPoints;
+                cv::FAST(cv::Mat(levels[i].image, ROI), 
+                        keyPoints, 20, 
+                        true, cv::FastFeatureDetector::TYPE_9_16);
+
+                if (keyPoints.size() < 1) {
+                    cv::FAST(cv::Mat(levels[i].image, ROI), 
+                            keyPoints, 10, 
+                            true, cv::FastFeatureDetector::TYPE_9_16);   
+                }
+
+                for (int j = 0, _end = (int)keyPoints.size(); 
+                        j < _end; j++) {
+                    levels[i].points.push_back( 
+                            cv::Point2f( keyPoints[j].pt.x + x, keyPoints[j].pt.y + y ) );
+                }
+            }
+        }
+
+        cout << "level: " << i << " extractFAST num: " << levels[i].points.size() << endl; 
+        
+    }
+
+}
+
+// set extracted FAST feature as measurements
+void ImageFrame::setFASTAsMeasure()
+{
     // set measure2ds
     measure2ds.reserve(levels[0].points.size()+
             levels[1].points.size()+
@@ -166,16 +253,16 @@ void ImageFrame::extractFAST(int lowNum, int highNum)
                     levels[i].points[j].x*levels[i].scaleFactor, 
                     levels[i].points[j].y*levels[i].scaleFactor);
             cv::Point2f undisPt = K->undistort(pt.x, pt.y);
-            measure2ds.push_back( Measure2D(pt, undisPt, this, i) );
+            measure2ds.push_back( 
+                    Measure2D(pt, undisPt, this, i) );
         }
     }
 
+    // reset ref2d
     for (int i = 0, _end = (int)measure2ds.size(); i < _end; i++) {
         measure2ds[i].ref2d = &(measure2ds[i]);
     }
 
-    isSelfReference = true;
-    
 }
 
 vector< int > ImageFrame::fuseFAST()
@@ -320,16 +407,36 @@ void ImageFrame::trackPatchFAST(ImageFrame& refFrame)
 //    cout << " track patch FAST done." << endl;
 }
 
-int ImageFrame::opticalFlowFAST(ImageFrame& refFrame)
+int ImageFrame::opticalFlowMeasure(ImageFrame& refFrame, int number)
 {
 
-    // prepare points
+    double sampleRate = 1;
+    int refMeasureNum = refFrame.measure2ds.size();
+
+    if (number < 0 || number > refMeasureNum) {
+        sampleRate = 1; 
+    } else {
+        sampleRate = (double)number / (double)refMeasureNum; 
+    }
+
+    // random sample, prepare points
+
+    srand(0);   // for debug , fix seed
+
     vector< cv::Point2f > pt_1, pt_2, undispt_2;
+    vector< int > idxs;
     pt_1.reserve(refFrame.measure2ds.size());
+    idxs.reserve(refFrame.measure2ds.size());
+
     for (int i = 0, _end = (int)refFrame.measure2ds.size(); 
             i < _end; i++ ) {
-        if (refFrame.measure2ds[i].valid)
-            pt_1.push_back(refFrame.measure2ds[i].pt);
+        if (refFrame.measure2ds[i].valid) {
+            int choose = rand() % 100;
+            if (choose / 100. < sampleRate ) {
+                pt_1.push_back(refFrame.measure2ds[i].pt);
+                idxs.push_back(i);
+            }
+        }
     }
 
     // optical flow points
@@ -349,56 +456,26 @@ int ImageFrame::opticalFlowFAST(ImageFrame& refFrame)
         undispt_2.push_back(K->undistort(pt_2[i].x, pt_2[i].y));
     }
 
-    //// check essential matrix, validation
-    //vector< cv::Point2f > org_pt;
-    //org_pt.reserve(undispt_2.size());
-    //for (int i = 0, _end = (int)pt_1.size(); i < _end; i++) {
-    //    org_pt.push_back(refFrame.measure2ds[i].ref2d->undisPt);
-    //}
-
-    //cv::Mat inlier;
-    //TIME_BEGIN();
-    //cv::findEssentialMat(org_pt, undispt_2, 
-    //        (K->fx + K->fy)/2, 
-    //        cv::Point2d(K->cx, K->cy),
-    //        cv::RANSAC, 0.999, 3, inlier);
-    //TIME_END("essential matrix estimation");
-
-    //// set measures2ds
-    //measure2ds.reserve(pt_2.size());
-    //for (int i = 0, _end = (int)undispt_2.size(); i < _end; i++) {
-    //    if (inlier.at<unsigned char>(i) == 0) {
-    //        refFrame.measure2ds[i].ref2d->outlierNum++;
-    //        if (refFrame.measure2ds[i].ref2d->outlierNum > 3) {
-    //            refFrame.measure2ds[i].ref2d->valid = false;
-    //        } else {
-    //            Measure2D measure2d(pt_2[i], undispt_2[i], -1);
-    //            measure2d.ref2d = refFrame.measure2ds[i].ref2d;
-    //            measure2ds.push_back(measure2d);    
-    //        }
-    //    } else {
-    //        Measure2D measure2d(pt_2[i], undispt_2[i], -1);
-    //        measure2d.ref2d = refFrame.measure2ds[i].ref2d;
-    //        measure2ds.push_back(measure2d);
-    //    }
-    //}
-    
     // set measure2ds
     measure2ds.reserve(pt_2.size());
     for (int i = 0, _end = (int)pt_2.size(); i < _end; i++) {
         if (status.at<unsigned char>(i) == 0) {
-            refFrame.measure2ds[i].ref2d->outlierNum++;
-            if (refFrame.measure2ds[i].ref2d->outlierNum > 3) {
-                refFrame.measure2ds[i].ref2d->valid = false;
-            }
+            //refFrame.measure2ds[i].ref2d->outlierNum++;
+            //if (refFrame.measure2ds[i].ref2d->outlierNum > 3) {
+            //    refFrame.measure2ds[i].ref2d->valid = false;
+            //}
         } else {
-            Measure2D measure2d(pt_2[i], undispt_2[i], this, refFrame.measure2ds[i].ref2d->levelIdx);
-            measure2d.ref2d = refFrame.measure2ds[i].ref2d;
+            int idx = idxs[i];
+            Measure2D measure2d(pt_2[i], undispt_2[i], this, 
+                    refFrame.measure2ds[idx].ref2d->levelIdx);
+            measure2d.ref2d = refFrame.measure2ds[idx].ref2d;
+            measure2d.isSelfReference = false;      // opticalflow tracked feature 
+                                                    // is not selfreferenced
             measure2ds.push_back(measure2d);    
         }
     }
 
-    printf("Optical flow on %d points\n", measure2ds.size());
+    printf("Optical flow track %d points\n", measure2ds.size());
 
     return measure2ds.size();
 }

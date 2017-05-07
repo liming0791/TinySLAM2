@@ -63,8 +63,11 @@ int main(int argc, char** argv)
         TIME_END("Construct a imageFrame");
 
         TIME_BEGIN();
-        imageFrame.extractFAST();
+        imageFrame.extractFASTGrid();
+        //imageFrame.extractFAST();
         TIME_END("extract FAST");
+
+        imageFrame.setFASTAsMeasure();
 
         for (int i = 0, _end = (int)imageFrame.measure2ds.size(); i < _end; i++) {
             Measure2D* pmeasure2d = &imageFrame.measure2ds[i];

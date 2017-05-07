@@ -28,7 +28,7 @@ class Measure3D
 
         cv::Mat patch;
 
-        // TODO::reference to images points 2d
+        Measure2D* ref2d;
         
         Measure3D() = default;
         Measure3D(const cv::Point3f &p);
@@ -54,6 +54,9 @@ class Mapping
                 cv::Mat &t, 
                 cv::Mat &pts);
         void ClearMap();
+
+        void Save(char* filename);
+        void Load(char* filename);
 
         std::mutex mMapMutex; 
         std::mutex mQueueMutex;

@@ -65,12 +65,17 @@ class Initializer
 
         void SetFirstFrame(ImageFrame *f);
         bool TrackFeatureAndCheck(ImageFrame *f);
+
         bool TryInitialize(ImageFrame *f);
         bool RobustTrackPose2D2D(ImageFrame &lf, 
                 ImageFrame &rf);
+
+        bool TryInitializeByThirdParty(ImageFrame *f);
+
         bool TryInitializeByG2O(ImageFrame *f);
         bool RobustTrackPose2D2DG2O(ImageFrame &lf, 
                 ImageFrame &rf);
+
         bool CheckPoints(cv::Mat &R, cv::Mat &t, cv::Mat &pts);
 };
 

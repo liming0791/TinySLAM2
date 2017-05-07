@@ -6,6 +6,11 @@ CameraIntrinsic::CameraIntrinsic(double _cx, double _cy, double _fx, double _fy,
     printf("Init Camera Intrinsic:\n"
             "cx: %f, cy: %f, fx: %f, fy: %f, k1: %f, k2: %f, width: %d, height: %d\n",
             cx, cy, fx, fy, k1, k2, width, height);
+
+    CamK = (cv::Mat_<double>(3,3) << fx, 0, cx, 0 , fy, cy, 0, 0, 1);
+
+    CamKinv = CamK.inv();
+
 }
 
 CameraIntrinsic::CameraIntrinsic(const string& filename)
@@ -25,13 +30,18 @@ void CameraIntrinsic::loadFromFile(const string& filename)
     stringstream ss(line);
     ss >> fx >> fy >> cx >> cy >> k1 >> k2 >> width >> height;
 
+    CamK = (cv::Mat_<double>(3,3) << fx, 0, cx, 0 , fy, cy, 0, 0, 1);
+
+    CamKinv = CamK.inv();
+
     printf("Load Camera Intrinsic:\n"
             "cx: %f, cy: %f, fx: %f, fy: %f, k1: %f, k2: %f, width: %d, height: %d\n",
             cx, cy, fx, fy, k1, k2, width, height);
 
 }
 
-cv::Point2f CameraIntrinsic::distort(int x, int y) // TODO:: How to distort, inverse of undistort ? 
+cv::Point2f CameraIntrinsic::distort(int x, int y) 
+    // TODO:: How to distort, inverse of undistort ? 
 {
 
     double u = (x - cx) / fx;

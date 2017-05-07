@@ -1,9 +1,11 @@
 #include "Initializer.h"
+#include "ThirdPartyInit.h"
 
 void Initializer::SetFirstFrame(ImageFrame *f)
 {
 
-    f->extractFAST();
+    f->extractFASTGrid();
+    f->setFASTAsMeasure();
     //f->extractPatch();
     if (firstFrame!=NULL) {
         delete(firstFrame);
@@ -25,10 +27,10 @@ bool Initializer::TrackFeatureAndCheck(ImageFrame *f)
     // optical flow fast features from last frame
     int num_inliers;
     if (isFisrtFellow) {
-        num_inliers = f->opticalFlowFAST(*firstFrame);
+        num_inliers = f->opticalFlowMeasure(*firstFrame);
         isFisrtFellow = false;
     } else {
-        num_inliers = f->opticalFlowFAST(lastFrame);
+        num_inliers = f->opticalFlowMeasure(lastFrame);
     }
     f->mRefFrame = firstFrame;
     // upate last frame
@@ -44,9 +46,6 @@ bool Initializer::TrackFeatureAndCheck(ImageFrame *f)
         state = NOTINITIALIZED;
 
         // auto set first frame
-        f->extractFAST();
-        //f->trackedPoints = f->points;
-        //f->undisTrackedPoints = f->undisPoints;
         SetFirstFrame(f);
         return false;
     }
@@ -55,6 +54,89 @@ bool Initializer::TrackFeatureAndCheck(ImageFrame *f)
         printf("Initialize Tracked points num too small!"
                 " less than 0.5\n");
         return false;
+    }
+
+    return true;
+}
+
+bool Initializer::TryInitializeByThirdParty(ImageFrame *f)
+{
+    if (!TrackFeatureAndCheck(f)) {
+        return false;
+    }
+
+    // init ThirdPartyInit
+    ThirdPartyInit initer(*(f->K));
+
+    // set correspond
+    vector<int> vMatches12;
+    vector<int> vValidPtIndex;
+    initer.SetCorrespondPoints(*firstFrame, *f, vMatches12, vValidPtIndex);
+
+    // try initialize 
+    vector<bool> vbTriangulated;
+    vector<cv::Point3f> vP3D;
+    cv::Mat Rf, tf;
+    if (!initer.Initialize(vMatches12, Rf, tf, vP3D, vbTriangulated)) {
+        return false;
+    }
+    
+    cv::Mat R, t;
+    Rf.convertTo(R, CV_64FC1);
+    tf.convertTo(t, CV_64FC1);
+
+    // debug: check type of R t and other information
+    cout << "R type: " << Converter::getImageType(R.type()) << endl;
+    cout << "t type: " << Converter::getImageType(t.type()) << endl;
+
+    cout << "vMatches12 size: " << vMatches12.size() << endl;
+    cout << "vValidPtIndex size: " << vValidPtIndex.size() << endl;
+    cout << "vbTriangulated size: " << vbTriangulated.size() << endl;
+    cout << "vP3D size: " << vP3D.size() << endl;
+
+    // if success
+    // insert key frame
+    ImageFrame* nkf = firstFrame; 
+    nkf->isKeyFrame = true;
+    map->keyFrames.insert(nkf);
+    k1 = nkf;
+
+    f->R = R.clone();
+    f->t = t.clone();
+    ImageFrame* nkf2 = new ImageFrame(*f);
+    nkf2->isKeyFrame = true;
+    map->keyFrames.insert(nkf2);
+    k2 = nkf2;
+
+    // insert map points
+    for (int i = 0, _end = (int)vP3D.size(); i < _end; i++) {
+
+        if (!vbTriangulated[i])
+            continue;
+
+        int idx = vValidPtIndex[i];
+
+        Measure2D* pMeasure = &(k2->measure2ds[idx]);
+        Measure2D* pRefMeasure = pMeasure->ref2d;
+
+        Measure3D* pM3d = new Measure3D(vP3D[i]);
+
+        //int level = pMeasure->levelIdx;
+        //double levelScale = 
+        //        pMeasure->refFrame->levels[level].scaleFactor;
+
+        //cv::Mat patch2(pRefMeasure->refFrame->
+        //        levels[level].image,
+        //        cv::Rect(pRefMeasure->pt.x/levelScale-3,
+        //            pRefMeasure->pt.y/levelScale-3, 7, 7));
+
+        //patch2.copyTo(pM3d->patch);
+        pM3d->ref2d = pRefMeasure;      // set measure2d
+        // reference
+
+        map->mapPoints.insert(pM3d);
+        pMeasure->ref3d = pM3d;
+        pRefMeasure->ref3d = pM3d;
     }
 
     return true;
@@ -79,9 +161,11 @@ bool Initializer::RobustTrackPose2D2D(ImageFrame &lf, ImageFrame &rf)
     pt_idx.reserve(rf.measure2ds.size());
     for (int i = 0, _end = (int)rf.measure2ds.size(); 
             i < _end; i++ ) {
-        lp.push_back(rf.measure2ds[i].ref2d->undisPt);
-        rp.push_back(rf.measure2ds[i].undisPt);
-        pt_idx.push_back(i);
+        if (rf.measure2ds[i].valid) {
+            lp.push_back(rf.measure2ds[i].ref2d->undisPt);
+            rp.push_back(rf.measure2ds[i].undisPt);
+            pt_idx.push_back(i);
+        }
     }
 
     // check disparty
@@ -111,10 +195,11 @@ bool Initializer::RobustTrackPose2D2D(ImageFrame &lf, ImageFrame &rf)
         if (inliers.at<unsigned char>(i) == 1) {
             ++num_inliers;
         } else {
-            rf.measure2ds[i].ref2d->outlierNum++;
-            if (rf.measure2ds[i].ref2d->outlierNum > 5) {
-                rf.measure2ds[i].valid = false;
-                rf.measure2ds[i].ref2d->valid = false;
+            int idx = pt_idx[i];
+            rf.measure2ds[idx].ref2d->outlierNum++;
+            if (rf.measure2ds[idx].ref2d->outlierNum > 5) {
+                rf.measure2ds[idx].valid = false;
+                rf.measure2ds[idx].ref2d->valid = false;
             }
         }
     }
@@ -171,39 +256,6 @@ bool Initializer::RobustTrackPose2D2D(ImageFrame &lf, ImageFrame &rf)
         return false;
     }
 
-    // insert map points
-    for (int i = 0; i < pts_4d.cols; i++) {
-        float w = pts_4d.at<float>(3, i);
-        if (w!=0) {
-            int idx = pt_idx_tri[i];
-            Measure3D* pM3d = new Measure3D(
-                        cv::Point3f(
-                            pts_4d.at<float>(0, i)/w,
-                            pts_4d.at<float>(1, i)/w,
-                            pts_4d.at<float>(2, i)/w)
-                    );
-
-            Measure2D* pMeasure = &(rf.measure2ds[idx]);
-            Measure2D* pRefMeasure = pMeasure->ref2d;
-
-            int level = pMeasure->levelIdx;
-            double levelScale = pMeasure->refFrame->levels[level].scaleFactor;
-
-            //cv::Mat patch1(pMeasure->refFrame->levels[level].image,
-            //        cv::Rect(pMeasure->pt.x/levelScale -3, pMeasure->pt.y/levelScale-3, 7, 7));
-            cv::Mat patch2(pRefMeasure->refFrame->levels[level].image,
-                    cv::Rect(pRefMeasure->pt.x/levelScale-3, pRefMeasure->pt.y/levelScale-3, 7, 7));
-
-            //cv::addWeighted(patch1, 0.5, patch2, 0.5, 0, pM3d->patch);
-            patch2.copyTo(pM3d->patch);
-
-            map->mapPoints.insert(pM3d);
-            pMeasure->ref3d = pM3d;
-            pRefMeasure->ref3d = pM3d;
-            //cout << *pM3d << endl;
-        }
-    }
-
     // insert key frame
     ImageFrame* nkf = firstFrame; 
     nkf->isKeyFrame = true;
@@ -212,11 +264,45 @@ bool Initializer::RobustTrackPose2D2D(ImageFrame &lf, ImageFrame &rf)
 
     rf.R = R.clone();
     rf.t = t.clone();
-
     ImageFrame* nkf2 = new ImageFrame(rf);
     nkf2->isKeyFrame = true;
     map->keyFrames.insert(nkf2);
     k2 = nkf2;
+
+    // insert map points
+    for (int i = 0; i < pts_4d.cols; i++) {
+        float w = pts_4d.at<float>(3, i);
+        if (w!=0) {
+            int idx = pt_idx_tri[i];
+
+            Measure2D* pMeasure = &(k2->measure2ds[idx]);
+            Measure2D* pRefMeasure = pMeasure->ref2d;
+
+            Measure3D* pM3d = new Measure3D(
+                        cv::Point3f(
+                            pts_4d.at<float>(0, i)/w,
+                            pts_4d.at<float>(1, i)/w,
+                            pts_4d.at<float>(2, i)/w)
+                    );
+
+            //int level = pMeasure->levelIdx;
+            //double levelScale = 
+            //    pMeasure->refFrame->levels[level].scaleFactor;
+
+            //cv::Mat patch2(pRefMeasure->refFrame->
+            //        levels[level].image,
+            //        cv::Rect(pRefMeasure->pt.x/levelScale-3,
+            //        pRefMeasure->pt.y/levelScale-3, 7, 7));
+
+            //patch2.copyTo(pM3d->patch);
+            pM3d->ref2d = pRefMeasure;      // set measure2d
+                                            // reference
+
+            map->mapPoints.insert(pM3d);
+            pMeasure->ref3d = pM3d;
+            pRefMeasure->ref3d = pM3d;
+        }
+    }
 
     return true;
 }
@@ -505,7 +591,7 @@ bool Initializer::CheckPoints(cv::Mat &R, cv::Mat &t, cv::Mat &pts)
 
         double cosAngle = pts_3d.dot(O2P) / (cv::norm(pts_3d) * cv::norm(O2P));
 
-        if (cosAngle > 0.9998) {
+        if (cosAngle > 0.998) {
             pts.at<float>(3, i) = 0;   // mark as outlier
             //printf("Point disparty too smalll , cosAngle: %f\n", cosAngle);
         } else {

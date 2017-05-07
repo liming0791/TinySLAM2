@@ -27,6 +27,7 @@ class Viewer
         void drawKeyFrames();
         void drawMapPoints();
         void drawCameraNow();
+        void drawCameraTrace();
         void drawMapAxis();
 
     private:

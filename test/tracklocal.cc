@@ -62,6 +62,11 @@ int main(int argc, char** argv)
     bool isFirst = true;
     bool isInited = false;
 
+    if (isDataset || isVideo) {
+        //cmd = cv::waitKey(-1);
+        cmd = 's';
+    }
+
     while (true) {
 
         if ( !camera1.getFrame(Frame, camera1.BGR) ) {
@@ -72,6 +77,7 @@ int main(int argc, char** argv)
         // If is dataset, control at each image
         if (isDataset || isVideo) {
             cmd = cv::waitKey(-1);
+            //cmd = 's';
         }
 
         if (cmd == 's') {
@@ -79,6 +85,7 @@ int main(int argc, char** argv)
             tracker.reset();
             tracker.TrackMonocularLocal(*refImgFrame);
             isFirst = true;
+            cmd = ' ';
         } else {                                
             if ( refImgFrame != NULL ) {
 
@@ -107,6 +114,8 @@ int main(int argc, char** argv)
         cv::imshow("result",Frame);
         cmd = cv::waitKey(33);
     }
+
+    mapping.Save("map.bin");
 
     return 0;
 }
